@@ -1,0 +1,72 @@
+name: macOS ARM64 build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 40
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Install dependencies
+        run: |
+          test "$(uname -m)" = arm64
+          npm ci
+          npm install --prefix api
+      - name: Build native ARM64 API
+        working-directory: api
+        run: |
+          ./node_modules/.bin/pkg . -t node18-macos-arm64 -C GZip -o bin/app_macos --no-bytecode
+          chmod +x bin/app_macos
+          codesign --force --sign - bin/app_macos
+          file bin/app_macos
+          test "$(lipo -archs bin/app_macos)" = arm64
+      - name: Verify API starts
+        shell: bash
+        run: |
+          api/bin/app_macos --platform=lite --port=6521 > "$RUNNER_TEMP/api.log" 2>&1 &
+          api_pid=$!
+          trap 'kill "$api_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl --silent --output /dev/null http://127.0.0.1:6521/; then
+              cat "$RUNNER_TEMP/api.log"
+              exit 0
+            fi
+            if ! kill -0 "$api_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/api.log"
+              exit 1
+            fi
+            sleep 2
+          done
+          cat "$RUNNER_TEMP/api.log"
+          exit 1
+      - name: Build application
+        run: |
+          npm run build
+          npm run electron:build -- --mac --arm64 --publish never
+      - name: Verify packaged architectures
+        run: |
+          app="dist_electron/mac-arm64/MoeKoe Music.app"
+          file "$app/Contents/MacOS/MoeKoe Music" "$app/Contents/api/app_macos"
+          test "$(lipo -archs "$app/Contents/MacOS/MoeKoe Music")" = arm64
+          test "$(lipo -archs "$app/Contents/api/app_macos")" = arm64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MoeKoeMusic-macOS-arm64
+          path: |
+            dist_electron/*.dmg
+            dist_electron/*.zip
+          if-no-files-found: error
+          retention-days: 14
